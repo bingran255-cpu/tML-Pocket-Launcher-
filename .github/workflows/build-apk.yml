@@ -1,0 +1,149 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - 'managed/**'
+      - 'external/**'
+      - 'ui/**'
+      - '.github/workflows/build-apk.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Extract project tarball
+        run: |
+          # 如果仓库里上传了 tml-build.tar.gz，先解压覆盖
+          if [ -f "tml-build.tar.gz" ]; then
+            echo ">>> Extracting tml-build.tar.gz..."
+            tar xzf tml-build.tar.gz
+            rm tml-build.tar.gz
+          fi
+
+      - name: Create Directory.Build.props
+        run: |
+          if [ ! -f Directory.Build.props ]; then
+            cat > Directory.Build.props << 'EOF'
+<Project>
+  <Import Project="managed/Directory.Build.props" />
+</Project>
+EOF
+            echo "Created root Directory.Build.props"
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-package: jdk
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up .NET SDK 10
+        run: |
+          wget -qO dotnet-install.sh https://dot.net/v1/dotnet-install.sh
+          chmod +x dotnet-install.sh
+          ./dotnet-install.sh --channel 10.0 --version 10.0.101 --install-dir /usr/share/dotnet
+          echo "/usr/share/dotnet" >> $GITHUB_PATH
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Android SDK
+        uses: android/setup-android@v3
+
+      - name: Install NDK and CMake
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "ndk;30.0.14904198" "cmake;3.22.1" "build-tools;37.0.0" "platforms;android-37.0" "platform-tools"
+          # AGP compileSdk=37 查找 android-37，但 SDK 装的是 android-37.0，建软链
+          if [ ! -d "$ANDROID_HOME/platforms/android-37" ] && [ -d "$ANDROID_HOME/platforms/android-37.0" ]; then
+            ln -s "$ANDROID_HOME/platforms/android-37.0" "$ANDROID_HOME/platforms/android-37"
+          fi
+
+      - name: Download tModLoader release
+        run: |
+          mkdir -p /tmp/tml
+          curl -L --fail --retry 3 -o /tmp/tml/tModLoader.zip \
+            "https://github.com/tModLoader/tModLoader/releases/download/v2026.09.3.1/tModLoader.zip"
+
+      - name: Extract game references
+        run: |
+          mkdir -p build/game-references
+          unzip -q /tmp/tml/tModLoader.zip -d /tmp/tml/extracted
+          EXT=/tmp/tml/extracted
+          cp $EXT/tModLoader.dll build/game-references/
+          find $EXT -name "FNA.dll" -not -path "*/runtime/*" -not -path "*/BuildHost-netcore/*" -exec cp {} build/game-references/ \;
+          find $EXT -name "ReLogic.dll" -not -path "*/runtime/*" -not -path "*/BuildHost-netcore/*" -exec cp {} build/game-references/ \;
+          find $EXT -name "TerrariaHooks.dll" -not -path "*/runtime/*" -not -path "*/BuildHost-netcore/*" -exec cp {} build/game-references/ \;
+          find $EXT -name "Newtonsoft.Json.dll" -not -path "*/runtime/*" -not -path "*/BuildHost-netcore/*" -exec cp {} build/game-references/ \;
+          find $EXT -name "log4net.dll" -not -path "*/runtime/*" -not -path "*/BuildHost-netcore/*" -exec cp {} build/game-references/ \;
+          find $EXT -name "Hjson.dll" -not -path "*/runtime/*" -not -path "*/BuildHost-netcore/*" -exec cp {} build/game-references/ \;
+          echo "$EXT" > build/game-references/source.txt
+
+      - name: Build .NET managed layer
+        run: |
+          export DOTNET_CLI_TELEMETRY_OPTOUT=1
+          dotnet build MobileLauncher.slnx -c Release
+
+      - name: Build launcher assets
+        run: |
+          export DOTNET_CLI_TELEMETRY_OPTOUT=1
+          REPO_ROOT=$(pwd)
+
+          rm -rf build/launcher-publish android/app/src/main/assets/launcher android/app/src/main/assets/game
+
+          dotnet publish managed/MobileLauncher.Host/MobileLauncher.Host.csproj -c Release -r linux-arm64 --self-contained false -o build/launcher-publish
+          dotnet publish managed/MobileLauncher.Stores/MobileLauncher.Stores.csproj -c Release -r linux-arm64 --self-contained false -o build/launcher-publish/Stores
+
+          mkdir -p android/app/src/main/assets/launcher
+          cp -r build/launcher-publish/* android/app/src/main/assets/launcher/
+
+          dotnet build managed/MobileLauncher.Controls/MobileLauncher.Controls.csproj -c Release --nologo
+          cp managed/MobileLauncher.Controls/bin/Release/net10.0/MobileLauncher.Controls.dll android/app/src/main/assets/launcher/
+
+          dotnet build external/tML-Pocket-Patches/MobileLauncher.Patches.csproj -c Release --nologo \
+            -p:LauncherRoot="$REPO_ROOT" \
+            -p:DirectoryBuildPropsPath="$REPO_ROOT/managed/Directory.Build.props"
+          cp external/tML-Pocket-Patches/bin/Release/net10.0/MobileLauncher.Patches.dll android/app/src/main/assets/launcher/
+          cp external/tML-Pocket-Patches/LICENSE android/app/src/main/assets/launcher/RotatingartLauncher-LICENSE.txt 2>/dev/null || true
+
+      - name: Build React UI
+        run: |
+          cd ui/launcher
+          npm ci
+          npx tsc --noEmit
+          npx vite build
+          rm -rf ../../android/app/src/main/assets/ui
+          mkdir -p ../../android/app/src/main/assets/ui
+          cp -r dist/* ../../android/app/src/main/assets/ui/
+          find ../../android/app/src/main/assets/ui -name "*.map" -delete
+          rm -f ../../android/app/src/main/assets/ui/preview.html
+
+      - name: Configure Android SDK
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          echo "org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8" >> android/gradle.properties
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --console=plain -PdefaultTmlArchive=/tmp/tml/tModLoader.zip
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tML-Pocket-Launcher-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7
