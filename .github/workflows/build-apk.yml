@@ -32,11 +32,7 @@ jobs:
       - name: Create Directory.Build.props
         run: |
           if [ ! -f Directory.Build.props ]; then
-            cat > Directory.Build.props << 'EOF'
-<Project>
-  <Import Project="managed/Directory.Build.props" />
-</Project>
-EOF
+            printf '%s\n' '<Project>' '  <Import Project="managed/Directory.Build.props" />' '</Project>' > Directory.Build.props
             echo "Created root Directory.Build.props"
           fi
 
