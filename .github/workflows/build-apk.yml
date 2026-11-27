@@ -118,8 +118,8 @@ jobs:
           find ../../android/app/src/main/assets/ui -name "*.map" -delete
           rm -f ../../android/app/src/main/assets/ui/preview.html
 
-      - name: Configure Android SDK
-        run: sed -i 's/compileSdk = 37/compileSdk = 36/' android/app/build.gradle.kts && sed -i 's/targetSdk = 37/targetSdk = 36/' android/app/build.gradle.kts && echo "sdk.dir=/opt/android-sdk" > android/local.properties && echo "org.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8" >> android/gradle.properties
+      - name: Install PowerShell
+        run: wget -qO /tmp/powershell.tar.gz "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/powershell-7.4.6-linux-x64.tar.gz" && mkdir -p /opt/powershell && tar xzf /tmp/powershell.tar.gz -C /opt/powershell && chmod +x /opt/powershell/pwsh && ln -sf /opt/powershell/pwsh /usr/local/bin/powershell && powershell --version
   
       - name: Build APK
         working-directory: android
